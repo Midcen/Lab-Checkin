@@ -7,7 +7,8 @@
   var cfg = window.LAB_CONFIG || {};
   var TZ = "Asia/Shanghai";
   var TABLE = cfg.table || "visits";
-  var PEOPLE = Array.isArray(cfg.people) ? cfg.people.filter(Boolean) : [];
+  var PEOPLE_TABLE = cfg.peopleTable || "people";
+  var SEED_PEOPLE = Array.isArray(cfg.people) ? cfg.people.filter(Boolean) : [];
   var LOOKBACK_HOURS = 72;   // 往前读多久的记录用于判断当前状态（覆盖通宵）
   var TAP_GUARD_MS = 5000;   // 连点保护：同一个名字 5 秒内只认一次
   var POLL_MS = 60000;       // 轮询间隔，多台设备之间保持同步
@@ -24,10 +25,12 @@
 
   var $ = function (sel) { return document.querySelector(sel); };
 
-  var serverRecords = [];  // 来自数据库
-  var pending = [];        // 本地还没写成功的记录
+  var roster = SEED_PEOPLE.slice();  // config 名单 + 数据库里新加的人
+  var serverRecords = [];            // 来自数据库
+  var pending = [];                  // 本地还没写成功的记录
   var view = "grid";
   var syncing = false;
+  var dialog = null;
 
   /* ---------------- 本地离线队列 ---------------- */
 
@@ -100,18 +103,67 @@
     });
   }
 
-  function insertRecord(rec) {
+  function fetchPeople() {
+    var url = cfg.supabaseUrl + "/rest/v1/" + PEOPLE_TABLE +
+      "?select=name&order=created_at.asc&limit=1000";
+    return fetch(url, { headers: headers() }).then(function (res) {
+      if (!res.ok) { throw new Error("读取成员失败 " + res.status); }
+      return res.json();
+    }).then(function (rows) {
+      var merged = SEED_PEOPLE.slice();
+      rows.forEach(function (row) {
+        if (row && row.name && merged.indexOf(row.name) === -1) { merged.push(row.name); }
+      });
+      roster = merged;
+    }).catch(function (err) {
+      // people 表还没建的时候不该拖垮整个页面，回退到 config 里的名单
+      console.warn(err);
+      roster = SEED_PEOPLE.slice();
+    });
+  }
+
+  function postVisit(row) {
     return fetch(cfg.supabaseUrl + "/rest/v1/" + TABLE, {
       method: "POST",
       headers: headers({ Prefer: "resolution=ignore-duplicates,return=minimal" }),
-      body: JSON.stringify([{
-        id: rec.id,
-        person: rec.person,
-        action: rec.action,
-        at: rec.at,
-      }]),
+      body: JSON.stringify([row]),
     }).then(function (res) {
+      if (res.status === 400) {
+        var err = new Error("写入被拒 400");
+        err.status = 400;
+        throw err;
+      }
       if (!res.ok) { throw new Error("写入失败 " + res.status); }
+    });
+  }
+
+  function insertRecord(rec) {
+    var row = {
+      id: rec.id,
+      person: rec.person,
+      action: rec.action,
+      at: rec.at,
+      at_local: rec.at_local,
+    };
+    return postVisit(row).catch(function (err) {
+      // 库还没跑 supabase-update.sql（缺 at_local 列）时退回旧字段，宁可少一列也别把记录丢了
+      if (err.status !== 400 || !row.at_local) { throw err; }
+      return postVisit({
+        id: row.id, person: row.person, action: row.action, at: row.at,
+      });
+    });
+  }
+
+  function insertPerson(name) {
+    return fetch(cfg.supabaseUrl + "/rest/v1/" + PEOPLE_TABLE, {
+      method: "POST",
+      headers: headers({ Prefer: "resolution=ignore-duplicates,return=minimal" }),
+      body: JSON.stringify([{ name: name }]),
+    }).then(function (res) {
+      if (res.status === 404) {
+        throw new Error("数据库里还没有 people 表，先跑一次 supabase-update.sql");
+      }
+      if (!res.ok) { throw new Error("添加失败 " + res.status); }
     });
   }
 
@@ -119,13 +171,17 @@
   function flush() {
     if (syncing || !pending.length) { return Promise.resolve(); }
     syncing = true;
+    var queue = pending.slice();   // 固定这一批：待同步数组会在成功后被裁剪，不能边删边按下标走
     var i = 0;
     function step() {
-      if (i >= pending.length) { syncing = false; render(); return; }
-      var rec = pending[i];
+      if (i >= queue.length) { syncing = false; render(); return; }
+      var rec = queue[i];
       return insertRecord(rec).then(function () {
         // 写成功就把这条从待同步挪进已确认，避免界面在下次拉取前回退
-        serverRecords.push({ id: rec.id, person: rec.person, action: rec.action, at: rec.at });
+        serverRecords.push({
+          id: rec.id, person: rec.person, action: rec.action,
+          at: rec.at, at_local: rec.at_local,
+        });
         pending = pending.filter(function (p) { return p.id !== rec.id; });
         savePending();
         i += 1;
@@ -167,6 +223,17 @@
     return m ? h + " 小时 " + m + " 分" : h + " 小时";
   }
 
+  // 北京时间的墙上时钟字符串，写进数据库的 at_local 列，方便直接看表格
+  function bjWallClock(date) {
+    var parts = {};
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+    }).formatToParts(date).forEach(function (p) { parts[p.type] = p.value; });
+    return parts.year + "-" + parts.month + "-" + parts.day + "T" +
+      parts.hour + ":" + parts.minute + ":" + parts.second;
+  }
+
   function hueOf(name) {
     var h = 0;
     for (var i = 0; i < name.length; i += 1) {
@@ -192,7 +259,7 @@
     $("#clock").textContent = clockOf(Date.now());
 
     var present = 0;
-    PEOPLE.forEach(function (p) {
+    roster.forEach(function (p) {
       var last = lastRecordOf(p);
       if (last && last.action === "in") { present += 1; }
     });
@@ -200,6 +267,9 @@
     $("#viewToggle").textContent = view === "grid" ? "今日记录" : "返回打卡";
     $("#grid").hidden = view !== "grid";
     $("#recordsView").hidden = view === "grid";
+
+    var fab = $("#addPerson");
+    fab.hidden = !(configured() && cfg.allowAddPerson !== false);
   }
 
   function renderGrid() {
@@ -207,7 +277,16 @@
     var now = Date.now();
     var frag = document.createDocumentFragment();
 
-    PEOPLE.forEach(function (person) {
+    if (!roster.length) {
+      var empty = document.createElement("p");
+      empty.className = "grid-empty";
+      empty.textContent = configured() && cfg.allowAddPerson !== false
+        ? "还没有成员，点右下角的加号添加第一位。"
+        : "人员名单是空的，先在 config.js 里填上名字。";
+      frag.appendChild(empty);
+    }
+
+    roster.forEach(function (person) {
       var last = lastRecordOf(person);
       var stats = todayStats(person);
       var isIn = Boolean(last && last.action === "in");
@@ -335,11 +414,155 @@
     toastTimer = setTimeout(function () { el.classList.remove("show"); }, 1800);
   }
 
+  /* ---------------- 弹窗 ---------------- */
+
+  function closeDialog() {
+    if (dialog) {
+      dialog.remove();
+      dialog = null;
+    }
+  }
+
+  function showDialog(opts) {
+    closeDialog();
+
+    var overlay = document.createElement("div");
+    overlay.className = "overlay";
+
+    var box = document.createElement("div");
+    box.className = "dialog";
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-label", opts.title);
+
+    var title = document.createElement("h2");
+    title.className = "dialog-title";
+    title.textContent = opts.title;
+    box.appendChild(title);
+
+    if (opts.desc) {
+      var desc = document.createElement("p");
+      desc.className = "dialog-desc";
+      desc.textContent = opts.desc;
+      box.appendChild(desc);
+    }
+
+    if (opts.items && opts.items.length) {
+      var ul = document.createElement("ul");
+      ul.className = "checklist";
+      opts.items.forEach(function (text) {
+        var li = document.createElement("li");
+        var tick = document.createElement("span");
+        tick.className = "tick";
+        tick.textContent = "✓";
+        tick.setAttribute("aria-hidden", "true");
+        var label = document.createElement("span");
+        label.textContent = text;
+        li.appendChild(tick);
+        li.appendChild(label);
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+    }
+
+    var input = null;
+    if (opts.input) {
+      input = document.createElement("input");
+      input.className = "dialog-input";
+      input.type = "text";
+      input.placeholder = opts.input.placeholder || "";
+      input.maxLength = opts.input.maxLength || 20;
+      input.autocomplete = "off";
+      box.appendChild(input);
+    }
+
+    var actions = document.createElement("div");
+    actions.className = "dialog-actions";
+
+    var cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "ghost";
+    cancel.textContent = opts.cancelText || "取消";
+    cancel.addEventListener("click", function () {
+      closeDialog();
+      if (opts.onCancel) { opts.onCancel(); }
+    });
+
+    var ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = "primary";
+    ok.textContent = opts.confirmText || "确定";
+    ok.addEventListener("click", function () {
+      var value = input ? input.value.trim() : "";
+      if (input && !value) { input.focus(); return; }
+      closeDialog();
+      if (opts.onConfirm) { opts.onConfirm(value); }
+    });
+
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    box.appendChild(actions);
+    overlay.appendChild(box);
+
+    overlay.addEventListener("click", function (ev) {
+      if (ev.target === overlay) {
+        closeDialog();
+        if (opts.onCancel) { opts.onCancel(); }
+      }
+    });
+
+    document.body.appendChild(overlay);
+    dialog = overlay;
+
+    if (input) {
+      ok.disabled = !input.value.trim();
+      input.addEventListener("input", function () { ok.disabled = !input.value.trim(); });
+      input.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter" && input.value.trim()) {
+          ev.preventDefault();
+          ok.click();
+        }
+      });
+      setTimeout(function () { input.focus(); }, 40);
+    } else {
+      setTimeout(function () { ok.focus(); }, 40);
+    }
+  }
+
   /* ---------------- 交互 ---------------- */
 
   function newId() {
     if (window.crypto && window.crypto.randomUUID) { return window.crypto.randomUUID(); }
     return "id-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+  }
+
+  function commit(person, action) {
+    var now = new Date();
+    var rec = {
+      id: newId(),
+      person: person,
+      action: action,
+      at: now.toISOString(),
+      at_local: bjWallClock(now),
+      __local: true,
+    };
+
+    pending.push(rec);
+    savePending();
+    render();
+    toast((action === "in" ? "已签到 " : "已签退 ") + clockOf(now));
+    flush();
+  }
+
+  // 此刻还在场的人数，排除掉正在签退的这个人
+  function presentOthers(person) {
+    var lastByPerson = {};
+    allRecords().forEach(function (r) { lastByPerson[r.person] = r; });
+    var count = 0;
+    Object.keys(lastByPerson).forEach(function (name) {
+      if (name !== person && lastByPerson[name].action === "in") { count += 1; }
+    });
+    return count;
   }
 
   function onTap(person) {
@@ -349,28 +572,56 @@
       return;
     }
 
-    var action = last && last.action === "in" ? "out" : "in";
-    var rec = {
-      id: newId(),
-      person: person,
-      action: action,
-      at: new Date().toISOString(),
-      __local: true,
-    };
+    if (last && last.action === "in") {
+      var reminder = cfg.leaveReminder || {};
+      // 只有「自己走之后实验室就没别人了」才提醒，中途出去不打扰
+      if (reminder.enabled !== false && presentOthers(person) === 0) {
+        showDialog({
+          title: reminder.title || "离开前请确认",
+          desc: (reminder.desc || "{person}，实验室里只剩你了，请确认：")
+            .replace("{person}", person),
+          items: reminder.items || ["关好窗户", "关闭电闸", "锁好门"],
+          confirmText: reminder.confirmText || "已确认，签退",
+          cancelText: reminder.cancelText || "取消",
+          onConfirm: function () { commit(person, "out"); },
+        });
+        return;
+      }
+      commit(person, "out");
+      return;
+    }
 
-    pending.push(rec);
-    savePending();
+    commit(person, "in");
+  }
+
+  function addPerson(name) {
+    if (roster.indexOf(name) !== -1) {
+      toast("「" + name + "」已经在名单里");
+      return;
+    }
+    roster.push(name);
     render();
-    toast((action === "in" ? "已签到 " : "已签退 ") + clockOf(rec.at));
-    flush();
+    insertPerson(name).then(function () {
+      toast("已添加 " + name);
+    }).catch(function (err) {
+      console.warn(err);
+      roster = roster.filter(function (n) { return n !== name; });
+      render();
+      toast(err.message || "添加失败，请检查网络");
+    });
   }
 
   function exportCsv() {
     var today = dayOf(Date.now());
     var rows = allRecords().filter(function (r) { return dayOf(r.at) === today; });
-    var lines = ["姓名,动作,时间"];
+    var lines = ["姓名,动作,日期,时间"];
     rows.forEach(function (r) {
-      lines.push([r.person, r.action === "in" ? "进入" : "离开", clockOf(r.at)].join(","));
+      lines.push([
+        r.person,
+        r.action === "in" ? "进入" : "离开",
+        dayOf(r.at),
+        clockOf(r.at),
+      ].join(","));
     });
     var blob = new Blob(["\ufeff" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
     var a = document.createElement("a");
@@ -382,7 +633,7 @@
 
   function refresh() {
     if (!configured()) { return Promise.resolve(); }
-    return fetchRecords()
+    return Promise.all([fetchRecords(), fetchPeople()])
       .then(function () { render(); return flush(); })
       .catch(function (err) {
         console.warn(err);
@@ -408,12 +659,28 @@
       if (card) { onTap(card.dataset.person); }
     });
 
+    document.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape" && dialog) { closeDialog(); }
+    });
+
     $("#viewToggle").addEventListener("click", function () {
       view = view === "grid" ? "records" : "grid";
       render();
     });
     $("#exportCsv").addEventListener("click", exportCsv);
-    $("#refresh").addEventListener("click", function () { refresh().then(function () { toast("已刷新"); }); });
+    $("#refresh").addEventListener("click", function () {
+      refresh().then(function () { toast("已刷新"); });
+    });
+    $("#addPerson").addEventListener("click", function () {
+      showDialog({
+        title: "添加成员",
+        desc: "输入姓名，加进来的人会存到数据库，所有设备都能看到。",
+        input: { placeholder: "姓名", maxLength: 20 },
+        confirmText: "添加",
+        cancelText: "取消",
+        onConfirm: addPerson,
+      });
+    });
 
     window.addEventListener("online", function () { flush(); });
     document.addEventListener("visibilitychange", function () {

@@ -13,8 +13,15 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB = {}
 PORT = 8788
+
+# 表名 -> {主键: 行}
+DB = {"visits": {}, "people": {}}
+
+
+def pick(row):
+    """people 表的主键是 name，visits 表是 id"""
+    return row.get("id") or row.get("name")
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -35,21 +42,25 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path.startswith("/rest/v1/"):
-            rows = list(DB.values())
+            table = parsed.path.rsplit("/", 1)[-1]
+            rows = list(DB.get(table, {}).values())
             since = parse_qs(parsed.query).get("at", [None])[0]
             if since and since.startswith("gte."):
-                rows = [r for r in rows if r["at"] >= since[4:]]
-            rows.sort(key=lambda r: r["at"], reverse="desc" in parsed.query)
+                rows = [r for r in rows if r.get("at", "") >= since[4:]]
+            key = "at" if table == "visits" else "created_at"
+            rows.sort(key=lambda r: r.get(key, ""), reverse="desc" in parsed.query)
             return self._json(rows)
         return super().do_GET()
 
     def do_POST(self):
         parsed = urlparse(self.path)
         if parsed.path.startswith("/rest/v1/"):
+            table = parsed.path.rsplit("/", 1)[-1]
             length = int(self.headers.get("Content-Length") or 0)
             rows = json.loads(self.rfile.read(length) or b"[]")
+            store = DB.setdefault(table, {})
             for row in rows:
-                DB.setdefault(row["id"], row)
+                store.setdefault(pick(row), row)
             self.send_response(201)
             self.send_header("Content-Length", "0")
             self.end_headers()

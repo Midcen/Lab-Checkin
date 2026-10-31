@@ -56,7 +56,7 @@ html, body {
 
 .sep { margin: 0 4px; color: var(--ink-3); }
 
-main { padding: 16px 18px 24px; max-width: 900px; margin: 0 auto; }
+main { padding: 16px 18px 96px; max-width: 900px; margin: 0 auto; }
 
 .notice {
   margin: 0 0 14px;
@@ -234,10 +234,11 @@ main { padding: 16px 18px 24px; max-width: 900px; margin: 0 auto; }
 .footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
+  gap: 10px;
   max-width: 900px;
   margin: 0 auto;
-  padding: 0 18px 28px;
+  padding: 0 96px 28px 18px;
 }
 
 .sync { font-size: 12px; color: var(--ink-3); }
@@ -262,6 +263,168 @@ main { padding: 16px 18px 24px; max-width: 900px; margin: 0 auto; }
 .toast.show {
   opacity: 1;
   transform: translate(-50%, 0);
+}
+
+/* ---------------- 右下角加号 ---------------- */
+
+.fab {
+  position: fixed;
+  right: 20px;
+  bottom: 24px;
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--bg);
+  font-size: 30px;
+  font-weight: 300;
+  line-height: 1;
+  padding-bottom: 3px;
+  cursor: pointer;
+  box-shadow: 0 8px 20px rgba(16, 24, 40, 0.22);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  z-index: 30;
+}
+
+.fab:active {
+  transform: scale(0.94);
+  box-shadow: 0 4px 10px rgba(16, 24, 40, 0.2);
+}
+
+/* ---------------- 弹窗 ---------------- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(10, 13, 18, 0.45);
+  animation: fade-in 0.14s ease;
+}
+
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+.dialog {
+  width: 100%;
+  max-width: 360px;
+  background: var(--card);
+  border-radius: 20px;
+  padding: 22px 22px 18px;
+  box-shadow: 0 24px 64px rgba(10, 13, 18, 0.28);
+  animation: pop-in 0.16s ease;
+}
+
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+.dialog-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.dialog-desc {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.checklist {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.checklist li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 13px;
+  border-radius: 12px;
+  background: var(--green-soft);
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.tick {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--green);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  flex: none;
+}
+
+.dialog-input {
+  margin-top: 16px;
+  width: 100%;
+  font: inherit;
+  font-size: 16px;
+  padding: 11px 13px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+}
+
+.dialog-input:focus {
+  outline: none;
+  border-color: var(--ink-3);
+  box-shadow: 0 0 0 3px rgba(141, 149, 163, 0.16);
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.dialog-actions > * { flex: 1; }
+
+.primary {
+  appearance: none;
+  font: inherit;
+  font-size: 14.5px;
+  font-weight: 550;
+  padding: 11px 14px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: var(--ink);
+  color: var(--bg);
+  cursor: pointer;
+}
+
+.primary:active { opacity: 0.85; }
+
+.primary:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.grid-empty {
+  grid-column: 1 / -1;
+  margin: 8px 0;
+  padding: 28px 18px;
+  text-align: center;
+  color: var(--ink-2);
+  font-size: 14px;
+  background: var(--card);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
 }
 
 @media (prefers-color-scheme: dark) {
